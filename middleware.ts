@@ -29,16 +29,21 @@ export async function middleware(request: NextRequest) {
     }
   );
 
-  // Refresh session - important for keeping users logged in
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // IMPORTANT: Don't block if session refresh fails
+  try {
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
 
-  // Redirect unauthenticated users trying to access /dashboard
-  if (!user && request.nextUrl.pathname.startsWith("/dashboard")) {
-    const url = request.nextUrl.clone();
-    url.pathname = "/";
-    return NextResponse.redirect(url);
+    // Only redirect to home if trying to access dashboard without auth
+    if (!user && request.nextUrl.pathname.startsWith("/dashboard")) {
+      const url = request.nextUrl.clone();
+      url.pathname = "/";
+      return NextResponse.redirect(url);
+    }
+  } catch (error) {
+    // If there's an error getting the user, just continue
+    console.error("Middleware auth error:", error);
   }
 
   return supabaseResponse;
