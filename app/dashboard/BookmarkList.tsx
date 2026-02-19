@@ -23,36 +23,59 @@ export default function BookmarkList({ userId, initialBookmarks }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const supabase = createClient();
+  const [supabase] = useState(() => createClient());
 
-  // Real-time subscription
   useEffect(() => {
-    const channel = supabase
-      .channel("bookmarks-realtime")
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "bookmarks",
-          filter: `user_id=eq.${userId}`,
-        },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            setBookmarks((prev) => [payload.new as Bookmark, ...prev]);
-          } else if (payload.eventType === "DELETE") {
-            setBookmarks((prev) =>
-              prev.filter((b) => b.id !== payload.old.id)
-            );
-          }
+  console.log("Setting up realtime channel...");
+  
+  const channel = supabase
+    .channel(`bookmarks-${userId}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "bookmarks",
+      },
+      async (payload) => {
+        console.log("Realtime event received:", payload);
+        
+        const { data } = await supabase
+          .from("bookmarks")
+          .select("*")
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false });
+        
+        if (data) {
+          console.log("Fetched bookmarks after realtime event:", data.length);
+          setBookmarks(data);
         }
-      )
-      .subscribe();
+      }
+    )
+    .subscribe((status) => {
+      console.log("Realtime subscription status:", status);
+    });
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [userId, supabase]);
+  // BACKUP: Poll every 5 seconds to catch INSERT events that realtime misses
+  const pollInterval = setInterval(async () => {
+    const { data } = await supabase
+      .from("bookmarks")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+    
+    if (data && data.length !== bookmarks.length) {
+      console.log("Poll detected change, updating bookmarks");
+      setBookmarks(data);
+    }
+  }, 5000); // Poll every 5 seconds
+
+  return () => {
+    console.log("Cleaning up realtime channel");
+    supabase.removeChannel(channel);
+    clearInterval(pollInterval);
+  };
+}, [supabase, userId, bookmarks.length]);
 
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();
@@ -63,18 +86,20 @@ export default function BookmarkList({ userId, initialBookmarks }: Props) {
       return;
     }
 
-    // Simple URL check
     let finalUrl = url.trim();
     if (!finalUrl.startsWith("http://") && !finalUrl.startsWith("https://")) {
       finalUrl = "https://" + finalUrl;
     }
 
     setLoading(true);
-    const { error: insertError } = await supabase.from("bookmarks").insert({
-      title: title.trim(),
-      url: finalUrl,
-      user_id: userId,
-    });
+
+    const { error: insertError } = await supabase
+      .from("bookmarks")
+      .insert({
+        title: title.trim(),
+        url: finalUrl,
+        user_id: userId,
+      });
 
     setLoading(false);
 
@@ -83,11 +108,38 @@ export default function BookmarkList({ userId, initialBookmarks }: Props) {
     } else {
       setTitle("");
       setUrl("");
+      // Manually refetch since INSERT events aren't firing
+      const { data } = await supabase
+        .from("bookmarks")
+        .select("*")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false });
+      if (data) {
+        setBookmarks(data);
+      }
     }
   }
 
   async function handleDelete(id: string) {
-    await supabase.from("bookmarks").delete().eq("id", id).eq("user_id", userId);
+    const { error } = await supabase
+      .from("bookmarks")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", userId);
+
+    if (error) {
+      console.error("Delete failed:", error);
+    } else {
+      // Manually refetch after delete
+      const { data } = await supabase
+        .from("bookmarks")
+        .select("*")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false });
+      if (data) {
+        setBookmarks(data);
+      }
+    }
   }
 
   return (
@@ -127,7 +179,9 @@ export default function BookmarkList({ userId, initialBookmarks }: Props) {
       <div>
         <h2 className="text-base font-semibold text-gray-700 mb-3">
           Your Bookmarks{" "}
-          <span className="text-gray-400 font-normal">({bookmarks.length})</span>
+          <span className="text-gray-400 font-normal">
+            ({bookmarks.length})
+          </span>
         </h2>
 
         {bookmarks.length === 0 ? (
